@@ -1,5 +1,5 @@
-import express, { Response } from "express";
-import pool from "../config/database";
+import { Router, Response } from "express";
+import prisma from "../config/prisma";
 import { authenticateToken, isAdminOrStaff } from "../middleware/auth";
 import {
   APIResponse,
@@ -8,12 +8,13 @@ import {
   MenuCategory,
   UpdateCategoryBody,
   MenuCategoryWithItems,
-} from "@/types";
-import { getRowOrNotFound } from "@/utils/response";
+} from "../types";
 
-const router = express.Router();
+const router = Router();
 
-// Get all categories for a menu
+// ========================================
+// GET all categories for a menu
+// ========================================
 router.get(
   "/menu/:menuId",
   authenticateToken,
@@ -23,24 +24,24 @@ router.get(
     res: Response<APIResponse<MenuCategoryWithItems[]>>,
   ) => {
     try {
-      const { menuId } = req.params;
+      const menuId = parseInt(req.params.menuId);
 
-      const result = await pool.query<MenuCategoryWithItems>(
-        `SELECT 
-        menu_categories.*,
-        COUNT(menu_items.id) as item_count
-       FROM menu_categories
-       LEFT JOIN menu_items ON menu_categories.id = menu_items.menu_category_id
-       WHERE menu_categories.menu_id = $1
-       GROUP BY menu_categories.id
-       ORDER BY menu_categories.display_order`,
-        [menuId],
-      );
-
-      return res.json({
-        success: true,
-        data: result.rows,
+      const categories = await prisma.menu_categories.findMany({
+        where: { menu_id: menuId },
+        include: {
+          _count: {
+            select: { menu_items: true },
+          },
+        },
+        orderBy: { display_order: "asc" },
       });
+
+      const data: MenuCategoryWithItems[] = categories.map((cat) => ({
+        ...cat,
+        item_count: cat._count.menu_items,
+      }));
+
+      return res.json({ success: true, data });
     } catch (err) {
       console.error("Get categories error:", err);
       return res.status(500).json({ error: "Failed to retrieve categories" });
@@ -49,7 +50,7 @@ router.get(
 );
 
 // ========================================
-// GET single category by ID
+// GET single category
 // ========================================
 router.get(
   "/:id",
@@ -60,15 +61,13 @@ router.get(
     res: Response<APIResponse<MenuCategory>>,
   ) => {
     try {
-      const { id } = req.params;
+      const category = await prisma.menu_categories.findUnique({
+        where: { id: parseInt(req.params.id) },
+      });
 
-      const result = await pool.query<MenuCategory>(
-        "SELECT * FROM menu_categories WHERE id = $1",
-        [id],
-      );
-
-      const category = getRowOrNotFound(result.rows, res, "Category not found");
-      if (!category) throw new Error("Category not found");
+      if (!category) {
+        return res.status(404).json({ error: "Category not found" });
+      }
 
       return res.json({ success: true, data: category });
     } catch (err) {
@@ -92,46 +91,29 @@ router.post(
     try {
       const { menu_id, name, description, image_url } = req.body;
 
-      if (!name || !name.trim()) {
-        return res.status(400).json({ error: "Category name is required" });
+      if (!name?.trim() || !menu_id) {
+        return res.status(400).json({ error: "Name and Menu ID are required" });
       }
 
-      if (!menu_id) {
-        return res.status(400).json({ error: "Menu ID is required" });
-      }
+      // Розрахунок наступного display_order через агрегацію
+      const aggregate = await prisma.menu_categories.aggregate({
+        where: { menu_id },
+        _max: { display_order: true },
+      });
 
-      // Get max display_order
-      const maxOrderResult = await pool.query(
-        `SELECT COALESCE(MAX(display_order), 0) + 1 as next_order 
-         FROM menu_categories 
-         WHERE menu_id = $1`,
-        [menu_id],
-      );
-      const displayOrder = maxOrderResult.rows[0].next_order;
+      const displayOrder = (aggregate._max.display_order || 0) + 1;
 
-      const result = await pool.query<MenuCategory>(
-        `INSERT INTO menu_categories (menu_id, name, description, image_url, display_order)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING *`,
-        [
+      const newCategory = await prisma.menu_categories.create({
+        data: {
           menu_id,
-          name.trim(),
-          description?.trim() || null,
-          image_url || null,
-          displayOrder,
-        ],
-      );
+          name: name.trim(),
+          description: description?.trim() || null,
+          image_url: image_url || null,
+          display_order: displayOrder,
+        },
+      });
 
-      const category = getRowOrNotFound(
-        result.rows,
-        res,
-        "Failed to create category",
-      );
-      if (!category) {
-        throw new Error("Failed to create category");
-      }
-
-      return res.status(201).json({ success: true, data: category });
+      return res.status(201).json({ success: true, data: newCategory });
     } catch (err) {
       console.error("Create category error:", err);
       return res.status(500).json({ error: "Failed to create category" });
@@ -140,7 +122,7 @@ router.post(
 );
 
 // ========================================
-// UPDATE category (name, description, image)
+// UPDATE category (with Items Reordering)
 // ========================================
 router.put(
   "/:id",
@@ -150,86 +132,49 @@ router.put(
     req: AuthRequest<{ id: string }, {}, UpdateCategoryBody>,
     res: Response<APIResponse<MenuCategory>>,
   ) => {
-    const client = await pool.connect();
     try {
-      const { id } = req.params;
+      const categoryId = parseInt(req.params.id);
       const { name, description, image_url, items } = req.body;
 
-      await client.query("BEGIN");
+      // Використовуємо транзакцію для оновлення категорії та її товарів
+      const updatedCategory = await prisma.$transaction(async (tx) => {
+        // 1. Оновлюємо основні поля категорії
+        const category = await tx.menu_categories.update({
+          where: { id: categoryId },
+          data: {
+            name: name?.trim(),
+            description: description?.trim(),
+            image_url,
+            updated_at: new Date(),
+          },
+        });
 
-      const updates: string[] = [];
-      const values: any[] = [];
-      let paramCount = 1;
-
-      if (name !== undefined) {
-        updates.push(`name = $${paramCount++}`);
-        values.push(name.trim());
-      }
-      if (description !== undefined) {
-        updates.push(`description = $${paramCount++}`);
-        values.push(description?.trim() || null);
-      }
-      if (image_url !== undefined) {
-        updates.push(`image_url = $${paramCount++}`);
-        values.push(image_url || null);
-      }
-
-      if (updates.length === 0) {
-        return res.status(400).json({ error: "No fields to update" });
-      }
-
-      updates.push(`updated_at = NOW()`);
-      values.push(id);
-
-      const result = await pool.query<MenuCategory>(
-        `UPDATE menu_categories SET ${updates.join(", ")} WHERE id = $${paramCount} RETURNING *`,
-        values,
-      );
-
-      const updatedCategory = getRowOrNotFound(
-        result.rows,
-        res,
-        "Category not found",
-      );
-      if (!updatedCategory) {
-        await client.query("ROLLBACK");
-        throw new Error("Category not found");
-      }
-
-      if (items && items.length > 0) {
-        for (const item of items) {
-          await client.query(
-            `UPDATE menu_items SET display_order = $1, updated_at = NOW() WHERE id = $2`,
-            [item.display_order, item.id],
-          );
+        // 2. Якщо передано масив товарів для реордерінгу
+        if (items && items.length > 0) {
+          for (const item of items) {
+            await tx.menu_items.update({
+              where: { id: item.id },
+              data: { display_order: item.display_order },
+            });
+          }
         }
-      }
 
-      await client.query("COMMIT");
-
-      const finalResult = await pool.query<MenuCategory>(
-        `SELECT * FROM menu_categories WHERE id = $1`,
-        [id],
-      );
-
-      const finalCategory = getRowOrNotFound(
-        finalResult.rows,
-        res,
-        "Category not found",
-      );
-      if (!finalCategory) {
-        throw new Error("Category not found");
-      }
+        return category;
+      });
 
       return res.json({ success: true, data: updatedCategory });
-    } catch (err) {
+    } catch (err: any) {
+      if (err.code === "P2025")
+        return res.status(404).json({ error: "Category not found" });
       console.error("Update category error:", err);
       return res.status(500).json({ error: "Failed to update category" });
     }
   },
 );
 
-// Delete category
+// ========================================
+// DELETE category (with Cascade Cleanup)
+// ========================================
 router.delete(
   "/:id",
   authenticateToken,
@@ -238,54 +183,48 @@ router.delete(
     req: AuthRequest<{ id: string }>,
     res: Response<APIResponse<MenuCategory>>,
   ) => {
-    const client = await pool.connect();
-
     try {
-      const { id } = req.params;
+      const categoryId = parseInt(req.params.id);
 
-      await client.query("BEGIN");
+      const deletedCategory = await prisma.$transaction(async (tx) => {
+        // Отримуємо всі ID товарів цієї категорії для видалення залежностей
+        const items = await tx.menu_items.findMany({
+          where: { menu_category_id: categoryId },
+          select: { id: true },
+        });
+        const itemIds = items.map((i) => i.id);
 
-      await client.query(
-        `DELETE FROM menu_item_variations 
-       WHERE menu_item_id IN (
-         SELECT id FROM menu_items WHERE menu_category_id = $1
-       )`,
-        [id],
-      );
+        if (itemIds.length > 0) {
+          // Видаляємо варіації та модифікатори
+          await tx.menu_item_variations.deleteMany({
+            where: { menu_item_id: { in: itemIds } },
+          });
+          await tx.menu_item_modifiers.deleteMany({
+            where: { menu_item_id: { in: itemIds } },
+          });
+          // Видаляємо самі товари
+          await tx.menu_items.deleteMany({
+            where: { menu_category_id: categoryId },
+          });
+        }
 
-      await client.query(
-        `DELETE FROM menu_item_modifiers 
-       WHERE menu_item_id IN (
-         SELECT id FROM menu_items WHERE menu_category_id = $1
-       )`,
-        [id],
-      );
-
-      await client.query("DELETE FROM menu_items WHERE menu_category_id = $1", [
-        id,
-      ]);
-
-      const result = await client.query(
-        "DELETE FROM menu_categories WHERE id = $1 RETURNING *",
-        [id],
-      );
-
-      await client.query("COMMIT");
-
-      const category = getRowOrNotFound(result.rows, res, "Category not found");
-      if (!category) return;
+        // Видаляємо категорію
+        return await tx.menu_categories.delete({
+          where: { id: categoryId },
+        });
+      });
 
       return res.json({
         success: true,
-        data: category,
-        message: "Category deleted successfully",
+        data: deletedCategory,
+        // @ts-ignore (якщо ми хочемо додати кастомне повідомлення в APIResponse)
+        message: "Category and its items deleted successfully",
       });
-    } catch (err) {
-      await client.query("ROLLBACK");
+    } catch (err: any) {
+      if (err.code === "P2025")
+        return res.status(404).json({ error: "Category not found" });
       console.error("Delete category error:", err);
       return res.status(500).json({ error: "Failed to delete category" });
-    } finally {
-      client.release();
     }
   },
 );

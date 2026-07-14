@@ -1,12 +1,11 @@
 import { Router, Response } from "express";
-import pool from "../config/database";
+import prisma from "../config/prisma";
 import { authenticateToken, isAdminOrStaff } from "../middleware/auth";
 import {
   AuthRequest,
   ModifierCategoryWithModifiers,
   APIResponse,
 } from "../types";
-import { getRowOrNotFound } from "@/utils/response";
 
 const router = Router();
 
@@ -22,46 +21,36 @@ router.get(
     res: Response<APIResponse<ModifierCategoryWithModifiers[]>>,
   ) => {
     try {
-      const result = await pool.query(
-        `SELECT 
-          mc.id,
-          mc.name,
-          mc.description,
-          mc.display_order,
-          mc.created_at,
-          mc.updated_at,
-          COALESCE(
-            json_agg(
-              json_build_object(
-                'id', m.id,
-                'category_id', m.category_id,
-                'name', m.name,
-                'default_price', m.default_price,
-                'display_order', m.display_order,
-                'created_at', m.created_at,
-                'updated_at', m.updated_at
-              ) ORDER BY m.display_order
-            ) FILTER (WHERE m.id IS NOT NULL),
-            '[]'
-          ) as modifiers
-         FROM modifier_categories mc
-         LEFT JOIN modifiers m ON mc.id = m.category_id
-         GROUP BY mc.id
-         ORDER BY mc.display_order`,
-      );
+      const categories = await prisma.modifier_categories.findMany({
+        include: {
+          modifiers: {
+            orderBy: { display_order: "asc" },
+          },
+        },
+        orderBy: { display_order: "asc" },
+      });
 
-      return res.json({ success: true, data: result.rows });
+      // Мапимо Decimal у number для цін модифікаторів
+      const data = categories.map((cat) => ({
+        ...cat,
+        modifiers: cat.modifiers.map((m) => ({
+          ...m,
+          default_price: Number(m.default_price),
+        })),
+      }));
+
+      return res.json({ success: true, data });
     } catch (err) {
       console.error("Get modifier categories error:", err);
-      return res.status(500).json({
-        error: "Failed to retrieve modifier categories",
-      });
+      return res
+        .status(500)
+        .json({ error: "Failed to retrieve modifier categories" });
     }
   },
 );
 
 // ========================================
-// GET single modifier category WITH modifiers
+// GET single modifier category
 // ========================================
 router.get(
   "/:id",
@@ -72,52 +61,30 @@ router.get(
     res: Response<APIResponse<ModifierCategoryWithModifiers>>,
   ) => {
     try {
-      const { id } = req.params;
-
-      const result = await pool.query(
-        `SELECT 
-          mc.id,
-          mc.name,
-          mc.description,
-          mc.display_order,
-          mc.created_at,
-          mc.updated_at,
-          COALESCE(
-            json_agg(
-              json_build_object(
-                'id', m.id,
-                'category_id', m.category_id,
-                'name', m.name,
-                'default_price', m.default_price,
-                'display_order', m.display_order,
-                'created_at', m.created_at,
-                'updated_at', m.updated_at
-              ) ORDER BY m.display_order
-            ) FILTER (WHERE m.id IS NOT NULL),
-            '[]'
-          ) as modifiers
-         FROM modifier_categories mc
-         LEFT JOIN modifiers m ON mc.id = m.category_id
-         WHERE mc.id = $1
-         GROUP BY mc.id`,
-        [id],
-      );
-
-      const category = getRowOrNotFound(
-        result.rows,
-        res,
-        "Modifier category not found",
-      );
-      if (!category) {
-        throw new Error("Modifier category not found");
-      }
-
-      return res.json({ success: true, data: category });
-    } catch (err) {
-      console.error("Get modifier category error:", err);
-      return res.status(500).json({
-        error: "Failed to retrieve modifier category",
+      const id = parseInt(req.params.id);
+      const category = await prisma.modifier_categories.findUnique({
+        where: { id },
+        include: {
+          modifiers: { orderBy: { display_order: "asc" } },
+        },
       });
+
+      if (!category)
+        return res.status(404).json({ error: "Modifier category not found" });
+
+      const data = {
+        ...category,
+        modifiers: category.modifiers.map((m) => ({
+          ...m,
+          default_price: Number(m.default_price),
+        })),
+      };
+
+      return res.json({ success: true, data });
+    } catch (err) {
+      return res
+        .status(500)
+        .json({ error: "Failed to retrieve modifier category" });
     }
   },
 );
@@ -140,51 +107,37 @@ router.post(
     try {
       const { name, description, display_order } = req.body;
 
-      if (!name || !name.trim()) {
+      if (!name?.trim()) {
         return res.status(400).json({ error: "Name is required" });
       }
 
-      // Get max display_order if not provided
+      // Визначаємо наступний display_order, якщо не передано
       let order = display_order;
       if (order === undefined) {
-        const maxOrderResult = await pool.query(
-          `SELECT COALESCE(MAX(display_order), -1) + 1 as next_order 
-           FROM modifier_categories`,
-        );
-        order = maxOrderResult.rows[0].next_order;
+        const lastCategory = await prisma.modifier_categories.findFirst({
+          orderBy: { display_order: "desc" },
+          select: { display_order: true },
+        });
+        order = (lastCategory?.display_order ?? -1) + 1;
       }
 
-      const result = await pool.query(
-        `INSERT INTO modifier_categories (name, description, display_order)
-         VALUES ($1, $2, $3)
-         RETURNING *`,
-        [name.trim(), description?.trim() || null, order],
-      );
-
-      const category = getRowOrNotFound(
-        result.rows,
-        res,
-        "Failed to create modifier category",
-      );
-      if (!category) {
-        throw new Error("Failed to create modifier category");
-      }
-
-      // Return with empty modifiers array
-      const categoryWithModifiers = {
-        ...category,
-        modifiers: [],
-      };
-
-      return res.status(201).json({
-        success: true,
-        data: categoryWithModifiers,
+      const newCategory = await prisma.modifier_categories.create({
+        data: {
+          name: name.trim(),
+          description: description?.trim() || null,
+          display_order: order,
+        },
+        include: { modifiers: true },
       });
+
+      return res
+        .status(201)
+        .json({ success: true, data: { ...newCategory, modifiers: [] } });
     } catch (err) {
-      console.error("Create modifier category error:", err);
-      return res.status(500).json({
-        error: "Failed to create modifier category",
-      });
+      console.error("Create error:", err);
+      return res
+        .status(500)
+        .json({ error: "Failed to create modifier category" });
     }
   },
 );
@@ -204,95 +157,37 @@ router.put(
     >,
     res: Response<APIResponse<ModifierCategoryWithModifiers>>,
   ) => {
-    const client = await pool.connect();
-
     try {
-      const { id } = req.params;
+      const id = parseInt(req.params.id);
       const { name, description, display_order } = req.body;
 
-      await client.query("BEGIN");
-
-      const updates: string[] = [];
-      const values: any[] = [];
-      let paramCount = 1;
-
-      if (name !== undefined) {
-        updates.push(`name = $${paramCount++}`);
-        values.push(name.trim());
-      }
-      if (description !== undefined) {
-        updates.push(`description = $${paramCount++}`);
-        values.push(description?.trim() || null);
-      }
-      if (display_order !== undefined) {
-        updates.push(`display_order = $${paramCount++}`);
-        values.push(display_order);
-      }
-
-      if (updates.length === 0) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ error: "No fields to update" });
-      }
-
-      updates.push(`updated_at = NOW()`);
-      values.push(id);
-
-      await client.query(
-        `UPDATE modifier_categories SET ${updates.join(", ")} WHERE id = $${paramCount}`,
-        values,
-      );
-
-      // Get updated category with modifiers
-      const result = await client.query(
-        `SELECT 
-          mc.id,
-          mc.name,
-          mc.description,
-          mc.display_order,
-          mc.created_at,
-          mc.updated_at,
-          COALESCE(
-            json_agg(
-              json_build_object(
-                'id', m.id,
-                'category_id', m.category_id,
-                'name', m.name,
-                'default_price', m.default_price,
-                'display_order', m.display_order,
-                'created_at', m.created_at,
-                'updated_at', m.updated_at
-              ) ORDER BY m.display_order
-            ) FILTER (WHERE m.id IS NOT NULL),
-            '[]'
-          ) as modifiers
-         FROM modifier_categories mc
-         LEFT JOIN modifiers m ON mc.id = m.category_id
-         WHERE mc.id = $1
-         GROUP BY mc.id`,
-        [id],
-      );
-
-      const category = getRowOrNotFound(
-        result.rows,
-        res,
-        "Modifier category not found",
-      );
-      if (!category) {
-        await client.query("ROLLBACK");
-        throw new Error("Modifier category not found");
-      }
-
-      await client.query("COMMIT");
-
-      return res.json({ success: true, data: category });
-    } catch (err) {
-      await client.query("ROLLBACK");
-      console.error("Update modifier category error:", err);
-      return res.status(500).json({
-        error: "Failed to update modifier category",
+      const updated = await prisma.modifier_categories.update({
+        where: { id },
+        data: {
+          name: name?.trim(),
+          description:
+            description !== undefined ? description?.trim() : undefined,
+          display_order,
+          updated_at: new Date(),
+        },
+        include: {
+          modifiers: { orderBy: { display_order: "asc" } },
+        },
       });
-    } finally {
-      client.release();
+
+      const data = {
+        ...updated,
+        modifiers: updated.modifiers.map((m) => ({
+          ...m,
+          default_price: Number(m.default_price),
+        })),
+      };
+
+      return res.json({ success: true, data });
+    } catch (err) {
+      return res
+        .status(404)
+        .json({ error: "Modifier category not found or update failed" });
     }
   },
 );
@@ -304,50 +199,31 @@ router.delete(
   "/:id",
   authenticateToken,
   isAdminOrStaff,
-  async (
-    req: AuthRequest<{ id: string }>,
-    res: Response<APIResponse<{ message: string }>>,
-  ) => {
+  async (req: AuthRequest<{ id: string }>, res: Response) => {
     try {
-      const { id } = req.params;
+      const id = parseInt(req.params.id);
 
-      // Check if category has modifiers
-      const usageCheck = await pool.query(
-        "SELECT COUNT(*) as count FROM modifiers WHERE category_id = $1",
-        [id],
-      );
+      // Перевірка на наявність модифікаторів через Prisma
+      const count = await prisma.modifiers.count({
+        where: { category_id: id },
+      });
 
-      const usageCount = parseInt(usageCheck.rows[0].count);
-
-      if (usageCount > 0) {
+      if (count > 0) {
         return res.status(400).json({
-          error: `Cannot delete modifier category. It has ${usageCount} modifier(s).`,
+          error: `Cannot delete modifier category. It has ${count} modifier(s).`,
         });
       }
 
-      const result = await pool.query(
-        "DELETE FROM modifier_categories WHERE id = $1 RETURNING id",
-        [id],
-      );
-
-      const deletedCategory = getRowOrNotFound(
-        result.rows,
-        res,
-        "Modifier category not found",
-      );
-      if (!deletedCategory) {
-        throw new Error("Modifier category not found");
-      }
+      await prisma.modifier_categories.delete({ where: { id } });
 
       return res.json({
         success: true,
         data: { message: "Modifier category deleted successfully" },
       });
     } catch (err) {
-      console.error("Delete modifier category error:", err);
-      return res.status(500).json({
-        error: "Failed to delete modifier category",
-      });
+      return res
+        .status(500)
+        .json({ error: "Failed to delete modifier category" });
     }
   },
 );

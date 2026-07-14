@@ -1,11 +1,6 @@
 require("dotenv").config();
-const { Pool } = require("pg");
 const readline = require("readline");
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+const pool = require("../src/config/database");
 
 // ========================================
 // Clean Database Function

@@ -1,3 +1,10 @@
+import { locations } from "@prisma/client";
+import { PrismaToFront } from "./utils.types";
+
+// ========================================
+// JSON Structures (Для типізації Json полів)
+// ========================================
+
 export type DaySchedule = {
   open: string; // "08:00"
   close: string; // "20:00"
@@ -19,56 +26,29 @@ export type LocationType =
   | "takeout_only"
   | "dine_in_and_takeout";
 
-export type Location = {
-  id: number;
-  name: string;
-  address: string;
-  city: string;
-  state: string;
-  zip_code: string;
-  phone: string;
-  email: string | null;
-  is_active: boolean;
-  hours_of_operation: HoursOfOperation | null;
-  show_in_app: boolean;
-  delivery_available: boolean;
+// ========================================
+// Location Entity (Prisma-based)
+// ========================================
+
+// Використовуємо Omit, щоб замінити сирі Json типи на наші структуровані інтерфейси
+export type Location = Omit<
+  PrismaToFront<locations>,
+  "hours_of_operation" | "images" | "location_type"
+> & {
   location_type: LocationType;
-  image_url: string | null;
-  images: string[]; // Array of image URLs
-  created_at: Date;
-  updated_at: Date;
+  hours_of_operation: HoursOfOperation | null;
+  images: string[]; // Масив URL-адрес
 };
 
-export type CreateLocationBody = {
-  name: string;
-  address: string;
-  city: string;
-  state: string;
-  zip_code: string;
-  phone: string;
-  email?: string;
-  is_active?: boolean;
-  hours_of_operation?: HoursOfOperation;
-  show_in_app?: boolean;
-  delivery_available?: boolean;
-  location_type?: LocationType;
-  image_url?: string;
-  images?: string[];
-};
+// ========================================
+// Request Bodies
+// ========================================
 
-export type UpdateLocationBody = {
-  name?: string;
-  address?: string;
-  city?: string;
-  state?: string;
-  zip_code?: string;
-  phone?: string;
-  email?: string;
-  is_active?: boolean;
-  hours_of_operation?: HoursOfOperation;
-  show_in_app?: boolean;
-  delivery_available?: boolean;
-  location_type?: LocationType;
-  image_url?: string;
-  images?: string[];
-};
+// Для створення беремо все, крім системних полів
+export type CreateLocationBody = Omit<
+  Location,
+  "id" | "created_at" | "updated_at"
+>;
+
+// Для оновлення робимо всі поля CreateLocationBody опціональними
+export type UpdateLocationBody = Partial<CreateLocationBody>;

@@ -1,14 +1,9 @@
 import { Router, Response } from "express";
-import pool from "../config/database";
+import prisma from "../config/prisma"; // Міняємо pool на prisma
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import { authenticateToken } from "../middleware/auth";
-import {
-  isValidEmail,
-  isValidPassword,
-  isValidName,
-  isValidRole,
-} from "../utils/validation";
+import { isValidEmail, isValidPassword } from "../utils/validation";
 import {
   AuthRequest,
   ErrorResponse,
@@ -17,6 +12,7 @@ import {
   RegisterBody,
   SafeUser,
   SuccessResponse,
+  UserRole,
 } from "@/types";
 
 const router = Router();
@@ -33,48 +29,21 @@ router.post(
     try {
       const { email, password, first_name, last_name, role } = req.body;
 
-      // Validate email
-      if (!email || !isValidEmail(email)) {
+      // Validate email and password
+      if (!email || !isValidEmail(email))
         return res.status(400).json({ error: "Invalid email address" });
-      }
-
-      // Validate password
-      if (!password) {
+      if (!password)
         return res.status(400).json({ error: "Password is required" });
-      }
-
       const passwordValidation = isValidPassword(password);
-      if (!passwordValidation.valid) {
+      if (!passwordValidation.valid)
         return res.status(400).json({ error: passwordValidation.message });
-      }
-
-      // Validate names
-      if (first_name && !isValidName(first_name)) {
-        return res
-          .status(400)
-          .json({ error: "First name must be between 2 and 50 characters" });
-      }
-
-      if (last_name && !isValidName(last_name)) {
-        return res
-          .status(400)
-          .json({ error: "Last name must be between 2 and 50 characters" });
-      }
-
-      // Validate role
-      if (role && !isValidRole(role)) {
-        return res
-          .status(400)
-          .json({ error: "Invalid role. Must be: customer, staff, or admin" });
-      }
 
       // Check if user already exists
-      const existingUser = await pool.query(
-        "SELECT * FROM users WHERE email = $1",
-        [email.toLowerCase()],
-      );
+      const existingUser = await prisma.users.findUnique({
+        where: { email: email.toLowerCase() },
+      });
 
-      if (existingUser.rows.length > 0) {
+      if (existingUser) {
         return res
           .status(400)
           .json({ error: "User with this email already exists" });
@@ -85,29 +54,30 @@ router.post(
       const hashedPassword = await bcrypt.hash(password, saltRounds);
 
       // Create user
-      const result = await pool.query(
-        "INSERT INTO users (email, password, first_name, last_name, role) VALUES ($1, $2, $3, $4, $5) RETURNING id, email, first_name, last_name, role, created_at",
-        [
-          email.toLowerCase(),
-          hashedPassword,
+      const newUser = await prisma.users.create({
+        data: {
+          email: email.toLowerCase(),
+          password: hashedPassword,
           first_name,
           last_name,
-          role || "customer",
-        ],
-      );
+          role: (role as any) || "customer",
+        },
+        select: {
+          id: true,
+          email: true,
+          first_name: true,
+          last_name: true,
+          role: true,
+          created_at: true,
+        },
+      });
 
-      const newUser = result.rows[0];
-
-      // Generate JWT token
-      const jwtSecret = process.env.JWT_SECRET;
-      if (!jwtSecret) {
-        throw new Error("JWT_SECRET is not defined");
-      }
-
+      // JWT logic
+      const jwtSecret = process.env.JWT_SECRET!;
       const tokenPayload: JWTPayload = {
         userId: newUser.id,
         email: newUser.email,
-        role: newUser.role,
+        role: newUser.role as UserRole,
       };
 
       const token = jwt.sign(tokenPayload, jwtSecret, { expiresIn: "24h" });
@@ -115,10 +85,7 @@ router.post(
       return res.status(201).json({
         success: true,
         message: "User registered successfully",
-        data: {
-          user: newUser,
-          token: token,
-        },
+        data: { user: newUser as SafeUser, token },
       });
     } catch (err) {
       console.error("Registration error:", err);
@@ -141,66 +108,54 @@ router.post(
     try {
       const { email, password } = req.body;
 
-      // Validation
-      if (!email || !password) {
+      console.log("Login request:", { email, password });
+
+      if (!email || !password)
         return res
           .status(400)
           .json({ error: "Email and password are required" });
-      }
-
-      if (!isValidEmail(email)) {
-        return res.status(400).json({ error: "Invalid email format" });
-      }
 
       // Find user
-      const result = await pool.query("SELECT * FROM users WHERE email = $1", [
-        email.toLowerCase(),
-      ]);
+      const user = await prisma.users.findUnique({
+        where: { email: email.toLowerCase() },
+      });
 
-      if (result.rows.length === 0) {
+      console.log("User found:", user);
+
+      if (!user || !user.password) {
+        console.log("User not found or password is null");
         return res.status(401).json({ error: "Invalid email or password" });
-      }
-
-      const user = result.rows[0];
-
-      // Check if password field exists
-      if (!user.password) {
-        return res.status(401).json({
-          error: "Account not properly configured. Please contact support.",
-        });
       }
 
       // Verify password
       const validPassword = await bcrypt.compare(password, user.password);
 
-      if (!validPassword) {
+      console.log("Password verification result:", validPassword);
+
+      if (!validPassword)
         return res.status(401).json({ error: "Invalid email or password" });
-      }
 
       // Generate JWT token
-      const jwtSecret = process.env.JWT_SECRET;
-
-      if (!jwtSecret) {
-        throw new Error("JWT_SECRET is not defined");
-      }
-
+      const jwtSecret = process.env.JWT_SECRET!;
       const tokenPayload: JWTPayload = {
         userId: user.id,
         email: user.email,
-        role: user.role,
+        role: user.role as UserRole,
       };
 
-      const token = jwt.sign(tokenPayload, jwtSecret, { expiresIn: "24h" });
+      const token = jwt.sign(tokenPayload, jwtSecret, { expiresIn: "7d" });
 
-      const { password: _, ...safeUser } = user;
+      // Remove password from object
+      const safeUser = {
+        ...user,
+        password: "_",
+        balance: user.balance ? Number(user.balance) : 0,
+      };
 
       return res.json({
         success: true,
         message: "Login successful",
-        data: {
-          user: safeUser as SafeUser,
-          token: token,
-        },
+        data: { user: safeUser as SafeUser, token },
       });
     } catch (err) {
       console.error("Login error:", err);
@@ -217,30 +172,30 @@ router.get(
     res: Response<SuccessResponse<SafeUser> | ErrorResponse>,
   ) => {
     try {
-      if (!req.user) {
-        return res.status(401).json({
-          error: "User not authenticated",
-        });
-      }
+      if (!req.user)
+        return res.status(401).json({ error: "User not authenticated" });
 
-      const result = await pool.query(
-        "SELECT id, email, first_name, last_name, role, created_at FROM users WHERE id = $1",
-        [req.user.userId],
-      );
+      const user = await prisma.users.findUnique({
+        where: { id: req.user.userId },
+        select: {
+          id: true,
+          email: true,
+          first_name: true,
+          last_name: true,
+          role: true,
+          created_at: true,
+        },
+      });
 
-      if (result.rows.length === 0) {
-        return res.status(404).json({ error: "User not found" });
-      }
+      if (!user) return res.status(404).json({ error: "User not found" });
 
       return res.json({
         success: true,
-        data: result.rows[0],
+        data: user as SafeUser,
       });
     } catch (err) {
       console.error("Get profile error:", err);
-      return res.status(500).json({
-        error: "Failed to retrieve profile",
-      });
+      return res.status(500).json({ error: "Failed to retrieve profile" });
     }
   },
 );

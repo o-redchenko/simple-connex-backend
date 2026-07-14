@@ -27,3 +27,14 @@ export type Optional<T> = T | undefined;
 export type ID = number;
 export type Optionalize<T, K extends keyof T> = Omit<T, K> &
   Partial<Pick<T, K>>;
+
+export type PaginationInfo = {
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+};
+
+export type PaginatedSuccessResponse<T> = SuccessResponse<T> & {
+  pagination: PaginationInfo;
+};

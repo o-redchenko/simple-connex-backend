@@ -5,15 +5,18 @@ export type TransactionStatus = "pending" | "completed" | "failed";
 export type Transaction = {
   id: number;
   user_id: number;
-  order_id: number | null;
-  type: TransactionType;
+  type: "purchase" | "topup";
   amount: number;
-  balance_before: number;
   balance_after: number;
-  status: TransactionStatus;
-  payment_method: string | null;
-  notes: string | null;
+  description: string | null;
+  order_id: number | null;
   created_at: Date;
+};
+
+export type TransactionWithUser = Transaction & {
+  first_name: string;
+  last_name: string;
+  email: string;
 };
 
 // Request Bodies

@@ -1,5 +1,5 @@
 import express, { Response } from "express";
-import pool from "../config/database";
+import prisma from "../config/prisma";
 import { authenticateToken, isAdminOrStaff } from "../middleware/auth";
 import {
   APIResponse,
@@ -8,24 +8,31 @@ import {
   ItemModifier,
   UpdateModifierBody,
 } from "@/types";
-import { getRowOrFailed, getRowOrNotFound } from "@/utils/response";
 
 const router = express.Router();
 
-// Get all modifiers
+// ========================================
+// GET all modifiers
+// ========================================
 router.get(
   "/",
   authenticateToken,
   isAdminOrStaff,
   async (_req: AuthRequest, res: Response<APIResponse<ItemModifier[]>>) => {
     try {
-      const result = await pool.query<ItemModifier>(
-        "SELECT * FROM modifiers ORDER BY name",
-      );
+      const modifiers = await prisma.modifiers.findMany({
+        orderBy: { name: "asc" },
+      });
+
+      // Перетворюємо Decimal у number для фронтенда
+      const data: ItemModifier[] = modifiers.map((m) => ({
+        ...m,
+        default_price: Number(m.default_price),
+      }));
 
       return res.json({
         success: true,
-        data: result.rows,
+        data,
       });
     } catch (err) {
       console.error("Get modifiers error:", err);
@@ -34,41 +41,39 @@ router.get(
   },
 );
 
-// Create modifier
+// ========================================
+// CREATE modifier
+// ========================================
 router.post(
   "/",
   authenticateToken,
   isAdminOrStaff,
   async (
-    req: AuthRequest<{}, {}, CreateModifierBody>,
+    req: AuthRequest<{}, {}, CreateModifierBody & { category_id: number }>,
     res: Response<APIResponse<ItemModifier>>,
   ) => {
     try {
-      const { name, description, default_price } = req.body;
+      const { name, description, default_price, category_id, display_order } =
+        req.body;
 
       if (!name) {
         return res.status(400).json({ error: "Name is required" });
       }
 
-      const result = await pool.query<ItemModifier>(
-        "INSERT INTO modifiers (name, description, default_price) VALUES ($1, $2, $3) RETURNING *",
-        [name, description, default_price || 0],
-      );
-
-      const modifier = getRowOrFailed(
-        result.rows,
-        res,
-        "Failed to create modifier",
-      );
-
-      if (!modifier) {
-        return;
-      }
+      const modifier = await prisma.modifiers.create({
+        data: {
+          name,
+          description,
+          default_price: default_price || 0,
+          category_id,
+          display_order: display_order ?? 0,
+        },
+      });
 
       return res.status(201).json({
         success: true,
         message: "Modifier created successfully",
-        data: modifier,
+        data: { ...modifier, default_price: Number(modifier.default_price) },
       });
     } catch (err) {
       console.error("Create modifier error:", err);
@@ -77,7 +82,9 @@ router.post(
   },
 );
 
-// Update modifier
+// ========================================
+// UPDATE modifier
+// ========================================
 router.put(
   "/:id",
   authenticateToken,
@@ -88,41 +95,40 @@ router.put(
   ) => {
     try {
       const { id } = req.params;
-      const { name, description, default_price } = req.body;
+      const { name, description, default_price, category_id, display_order } =
+        req.body;
 
-      const result = await pool.query<ItemModifier>(
-        `UPDATE modifiers 
-       SET name = COALESCE($1, name), 
-           description = COALESCE($2, description),
-           default_price = COALESCE($3, default_price)
-       WHERE id = $4 
-       RETURNING *`,
-        [name, description, default_price, id],
-      );
-
-      const updatedModifier = getRowOrNotFound(
-        result.rows,
-        res,
-        "Modifier not found",
-      );
-
-      if (!updatedModifier) {
-        return;
-      }
+      const updated = await prisma.modifiers.update({
+        where: { id: parseInt(id) },
+        data: {
+          name: name || undefined,
+          description: description !== undefined ? description : undefined,
+          default_price:
+            default_price !== undefined ? default_price : undefined,
+          category_id: category_id || undefined,
+          display_order:
+            display_order !== undefined ? display_order : undefined,
+          updated_at: new Date(),
+        },
+      });
 
       return res.json({
         success: true,
         message: "Modifier updated successfully",
-        data: updatedModifier,
+        data: { ...updated, default_price: Number(updated.default_price) },
       });
     } catch (err) {
       console.error("Update modifier error:", err);
-      return res.status(500).json({ error: "Failed to update modifier" });
+      return res
+        .status(404)
+        .json({ error: "Modifier not found or update failed" });
     }
   },
 );
 
-// Delete modifier
+// ========================================
+// DELETE modifier
+// ========================================
 router.delete(
   "/:id",
   authenticateToken,
@@ -134,24 +140,13 @@ router.delete(
     try {
       const { id } = req.params;
 
-      const result = await pool.query<{ id: number; name: string }>(
-        "DELETE FROM modifiers WHERE id = $1 RETURNING *",
-        [id],
-      );
-
-      const deletedModifier = getRowOrNotFound(
-        result.rows,
-        res,
-        "Modifier not found",
-      );
-
-      if (!deletedModifier) {
-        return;
-      }
+      const deleted = await prisma.modifiers.delete({
+        where: { id: parseInt(id) },
+      });
 
       return res.json({
         success: true,
-        data: deletedModifier,
+        data: { id: deleted.id, name: deleted.name },
         message: "Modifier deleted successfully",
       });
     } catch (err) {

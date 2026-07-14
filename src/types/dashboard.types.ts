@@ -1,7 +1,17 @@
+import { transactions, locations, menu_items } from "@prisma/client";
+import { PrismaToFront } from "./utils.types";
+
+// ========================================
+// DASHBOARD PERIODS & TYPES
+// ========================================
+
 export type DashboardPeriod = "7days" | "1year" | "alltime";
 export type LocationPeriod = "month" | "year" | "alltime";
-export type PurchasedItemPeriod = "month" | "year" | "alltime";
 export type TransactionChartType = "purchases" | "topup" | "all";
+
+// ========================================
+// ANALYTICS ENTITIES (Prisma-based)
+// ========================================
 
 export type OverviewStats = {
   total_users: number;
@@ -10,7 +20,7 @@ export type OverviewStats = {
 };
 
 export type ChartDataPoint = {
-  date: Date;
+  date: Date | string;
   count: number;
 };
 
@@ -23,15 +33,7 @@ export type PurchasesChartDataPoint = ChartDataPoint & {
   revenue: number;
 };
 
-export type PieChartItem = {
-  name: string;
-  revenue: number;
-  percentage: number;
-};
-
-export type TopLocationItem = {
-  id: number;
-  name: string;
+export type TopLocationItem = Pick<locations, "id" | "name"> & {
   revenue: number;
   items_sold: number;
   order_count: number;
@@ -39,7 +41,11 @@ export type TopLocationItem = {
 
 export type TopLocationsData = {
   period: LocationPeriod;
-  pie_chart: PieChartItem[];
+  pie_chart: Array<{
+    name: string;
+    revenue: number;
+    percentage: number;
+  }>;
   top_3_list: TopLocationItem[];
 };
 
@@ -48,32 +54,16 @@ export type PurchasedItemData = {
   image_url: string | null;
   quantity_sold: number;
   revenue: number;
-  menu_item_id: number | null;
+  menu_item_id: menu_items["id"] | null;
 };
 
-export type OrderItemSummary = {
-  item_name: string;
-  total_quantity: number;
-  revenue: number;
-  order_count: number;
-};
-
-export type PurchasedItem = {
-  name: string;
-  quantity_sold: number;
-  revenue: number;
-  order_count: number;
-};
-
-export type LatestTransactionItem = {
-  id: number;
-  type: string;
-  amount: number;
+export type LatestTransactionItem = Pick<
+  PrismaToFront<transactions>,
+  "id" | "type" | "amount" | "created_at" | "order_id"
+> & {
   user_name: string;
   user_email: string;
-  order_id: number | null;
   order_status: string | null;
-  created_at: Date;
 };
 
 export type TransactionChartPoint = {
@@ -88,7 +78,16 @@ export type TransactionChartData = {
   chart_data: TransactionChartPoint[];
 };
 
-// Query Params
+export type QuickStats = {
+  today: number;
+  yesterday: number;
+  seven_day_average: number;
+};
+
+// ========================================
+// QUERY PARAMS
+// ========================================
+
 export type DashboardQuery = {
   period?: DashboardPeriod;
 };
@@ -104,10 +103,4 @@ export type ItemsQuery = {
 
 export type TransactionChartQuery = {
   type?: TransactionChartType;
-};
-
-export type QuickStats = {
-  today: number;
-  yesterday: number;
-  seven_day_average: number;
 };

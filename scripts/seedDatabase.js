@@ -1,11 +1,6 @@
 require("dotenv").config();
 const bcrypt = require("bcrypt");
-const { Pool } = require("pg");
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+const pool = require("../src/config/database");
 
 // ========================================
 // Helper Functions

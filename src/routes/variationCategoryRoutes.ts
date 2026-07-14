@@ -1,12 +1,11 @@
 import { Router, Response } from "express";
-import pool from "../config/database";
+import prisma from "../config/prisma";
 import { authenticateToken, isAdminOrStaff } from "../middleware/auth";
 import {
   AuthRequest,
   VariationCategoryWithVariations,
   APIResponse,
 } from "../types";
-import { getRowOrNotFound } from "@/utils/response";
 
 const router = Router();
 
@@ -22,40 +21,28 @@ router.get(
     res: Response<APIResponse<VariationCategoryWithVariations[]>>,
   ) => {
     try {
-      const result = await pool.query(
-        `SELECT 
-          vc.id,
-          vc.name,
-          vc.description,
-          vc.display_order,
-          vc.created_at,
-          vc.updated_at,
-          COALESCE(
-            json_agg(
-              json_build_object(
-                'id', v.id,
-                'category_id', v.category_id,
-                'name', v.name,
-                'default_price', v.default_price,
-                'display_order', v.display_order,
-                'created_at', v.created_at,
-                'updated_at', v.updated_at
-              ) ORDER BY v.display_order
-            ) FILTER (WHERE v.id IS NOT NULL),
-            '[]'
-          ) as variations
-         FROM variation_categories vc
-         LEFT JOIN variations v ON vc.id = v.category_id
-         GROUP BY vc.id
-         ORDER BY vc.display_order`,
-      );
+      const categories = await prisma.variation_categories.findMany({
+        include: {
+          variations: {
+            orderBy: { display_order: "asc" },
+          },
+        },
+        orderBy: { display_order: "asc" },
+      });
 
-      return res.json({ success: true, data: result.rows });
+      // Перетворюємо Decimal в Number для фронтенду
+      const data = categories.map((cat) => ({
+        ...cat,
+        variations: cat.variations.map((v) => ({
+          ...v,
+          default_price: Number(v.default_price),
+        })),
+      })) as unknown as VariationCategoryWithVariations[];
+
+      return res.json({ success: true, data });
     } catch (err) {
       console.error("Get variation categories error:", err);
-      return res.status(500).json({
-        error: "Failed to retrieve variation categories",
-      });
+      return res.status(500).json({ error: "Failed to retrieve categories" });
     }
   },
 );
@@ -67,57 +54,31 @@ router.get(
   "/:id",
   authenticateToken,
   isAdminOrStaff,
-  async (
-    req: AuthRequest<{ id: string }>,
-    res: Response<APIResponse<VariationCategoryWithVariations>>,
-  ) => {
+  async (req: AuthRequest<{ id: string }>, res: Response) => {
     try {
-      const { id } = req.params;
-
-      const result = await pool.query(
-        `SELECT 
-          vc.id,
-          vc.name,
-          vc.description,
-          vc.display_order,
-          vc.created_at,
-          vc.updated_at,
-          COALESCE(
-            json_agg(
-              json_build_object(
-                'id', v.id,
-                'category_id', v.category_id,
-                'name', v.name,
-                'default_price', v.default_price,
-                'display_order', v.display_order,
-                'created_at', v.created_at,
-                'updated_at', v.updated_at
-              ) ORDER BY v.display_order
-            ) FILTER (WHERE v.id IS NOT NULL),
-            '[]'
-          ) as variations
-         FROM variation_categories vc
-         LEFT JOIN variations v ON vc.id = v.category_id
-         WHERE vc.id = $1
-         GROUP BY vc.id`,
-        [id],
-      );
-
-      const category = getRowOrNotFound(
-        result.rows,
-        res,
-        "Variation category not found",
-      );
-      if (!category) {
-        throw new Error("Variation category not found");
-      }
-
-      return res.json({ success: true, data: category });
-    } catch (err) {
-      console.error("Get variation category error:", err);
-      return res.status(500).json({
-        error: "Failed to retrieve variation category",
+      const category = await prisma.variation_categories.findUnique({
+        where: { id: parseInt(req.params.id) },
+        include: {
+          variations: {
+            orderBy: { display_order: "asc" },
+          },
+        },
       });
+
+      if (!category)
+        return res.status(404).json({ error: "Category not found" });
+
+      const data = {
+        ...category,
+        variations: category.variations.map((v) => ({
+          ...v,
+          default_price: Number(v.default_price),
+        })),
+      };
+
+      return res.json({ success: true, data });
+    } catch (err) {
+      return res.status(500).json({ error: "Failed to retrieve category" });
     }
   },
 );
@@ -135,56 +96,37 @@ router.post(
       {},
       { name: string; description?: string; display_order?: number }
     >,
-    res: Response<APIResponse<VariationCategoryWithVariations>>,
+    res: Response,
   ) => {
     try {
       const { name, description, display_order } = req.body;
-
-      if (!name || !name.trim()) {
+      if (!name?.trim())
         return res.status(400).json({ error: "Name is required" });
-      }
 
-      // Get max display_order if not provided
+      // Розрахунок наступного display_order, якщо не надано
       let order = display_order;
       if (order === undefined) {
-        const maxOrderResult = await pool.query(
-          `SELECT COALESCE(MAX(display_order), -1) + 1 as next_order 
-           FROM variation_categories`,
-        );
-        order = maxOrderResult.rows[0].next_order;
+        const lastCat = await prisma.variation_categories.findFirst({
+          orderBy: { display_order: "desc" },
+          select: { display_order: true },
+        });
+        order = (lastCat?.display_order ?? -1) + 1;
       }
 
-      const result = await pool.query(
-        `INSERT INTO variation_categories (name, description, display_order)
-         VALUES ($1, $2, $3)
-         RETURNING *`,
-        [name.trim(), description?.trim() || null, order],
-      );
-
-      const category = getRowOrNotFound(
-        result.rows,
-        res,
-        "Failed to create variation category",
-      );
-      if (!category) {
-        throw new Error("Failed to create variation category");
-      }
-
-      // Return with empty variations array
-      const categoryWithVariations = {
-        ...category,
-        variations: [],
-      };
-
-      return res.status(201).json({
-        success: true,
-        data: categoryWithVariations,
+      const newCategory = await prisma.variation_categories.create({
+        data: {
+          name: name.trim(),
+          description: description?.trim() || null,
+          display_order: order,
+        },
+        include: { variations: true },
       });
+
+      return res
+        .status(201)
+        .json({ success: true, data: { ...newCategory, variations: [] } });
     } catch (err) {
-      console.error("Create variation category error:", err);
-      return res.status(500).json({
-        error: "Failed to create variation category",
-      });
+      return res.status(500).json({ error: "Failed to create category" });
     }
   },
 );
@@ -202,97 +144,39 @@ router.put(
       {},
       { name?: string; description?: string; display_order?: number }
     >,
-    res: Response<APIResponse<VariationCategoryWithVariations>>,
+    res: Response,
   ) => {
-    const client = await pool.connect();
-
     try {
       const { id } = req.params;
       const { name, description, display_order } = req.body;
 
-      await client.query("BEGIN");
-
-      const updates: string[] = [];
-      const values: any[] = [];
-      let paramCount = 1;
-
-      if (name !== undefined) {
-        updates.push(`name = $${paramCount++}`);
-        values.push(name.trim());
-      }
-      if (description !== undefined) {
-        updates.push(`description = $${paramCount++}`);
-        values.push(description?.trim() || null);
-      }
-      if (display_order !== undefined) {
-        updates.push(`display_order = $${paramCount++}`);
-        values.push(display_order);
-      }
-
-      if (updates.length === 0) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ error: "No fields to update" });
-      }
-
-      updates.push(`updated_at = NOW()`);
-      values.push(id);
-
-      await client.query(
-        `UPDATE variation_categories SET ${updates.join(", ")} WHERE id = $${paramCount}`,
-        values,
-      );
-
-      // Get updated category with variations
-      const result = await client.query(
-        `SELECT 
-          vc.id,
-          vc.name,
-          vc.description,
-          vc.display_order,
-          vc.created_at,
-          vc.updated_at,
-          COALESCE(
-            json_agg(
-              json_build_object(
-                'id', v.id,
-                'category_id', v.category_id,
-                'name', v.name,
-                'default_price', v.default_price,
-                'display_order', v.display_order,
-                'created_at', v.created_at,
-                'updated_at', v.updated_at
-              ) ORDER BY v.display_order
-            ) FILTER (WHERE v.id IS NOT NULL),
-            '[]'
-          ) as variations
-         FROM variation_categories vc
-         LEFT JOIN variations v ON vc.id = v.category_id
-         WHERE vc.id = $1
-         GROUP BY vc.id`,
-        [id],
-      );
-
-      const category = getRowOrNotFound(
-        result.rows,
-        res,
-        "Variation category not found",
-      );
-      if (!category) {
-        await client.query("ROLLBACK");
-        throw new Error("Variation category not found");
-      }
-
-      await client.query("COMMIT");
-
-      return res.json({ success: true, data: category });
-    } catch (err) {
-      await client.query("ROLLBACK");
-      console.error("Update variation category error:", err);
-      return res.status(500).json({
-        error: "Failed to update variation category",
+      const updated = await prisma.variation_categories.update({
+        where: { id: parseInt(id) },
+        data: {
+          name: name?.trim(),
+          description:
+            description !== undefined ? description?.trim() || null : undefined,
+          display_order,
+          updated_at: new Date(),
+        },
+        include: {
+          variations: { orderBy: { display_order: "asc" } },
+        },
       });
-    } finally {
-      client.release();
+
+      const data = {
+        ...updated,
+        variations: updated.variations.map((v) => ({
+          ...v,
+          default_price: Number(v.default_price),
+        })),
+      };
+
+      return res.json({ success: true, data });
+    } catch (err) {
+      return res
+        .status(404)
+        .json({ error: "Category not found or update failed" });
     }
   },
 );
@@ -304,50 +188,29 @@ router.delete(
   "/:id",
   authenticateToken,
   isAdminOrStaff,
-  async (
-    req: AuthRequest<{ id: string }>,
-    res: Response<APIResponse<{ message: string }>>,
-  ) => {
+  async (req: AuthRequest<{ id: string }>, res: Response) => {
     try {
-      const { id } = req.params;
+      const id = parseInt(req.params.id);
 
-      // Check if category has variations
-      const usageCheck = await pool.query(
-        "SELECT COUNT(*) as count FROM variations WHERE category_id = $1",
-        [id],
-      );
+      // Перевірка на наявність варіацій (Prisma не видалить автоматично, якщо є зв'язки без CASCADE)
+      const variationsCount = await prisma.variations.count({
+        where: { category_id: id },
+      });
 
-      const usageCount = parseInt(usageCheck.rows[0].count);
-
-      if (usageCount > 0) {
+      if (variationsCount > 0) {
         return res.status(400).json({
-          error: `Cannot delete variation category. It has ${usageCount} variation(s).`,
+          error: `Cannot delete category. It has ${variationsCount} variations.`,
         });
       }
 
-      const result = await pool.query(
-        "DELETE FROM variation_categories WHERE id = $1 RETURNING id",
-        [id],
-      );
-
-      const deletedCategory = getRowOrNotFound(
-        result.rows,
-        res,
-        "Variation category not found",
-      );
-      if (!deletedCategory) {
-        throw new Error("Variation category not found");
-      }
+      await prisma.variation_categories.delete({ where: { id } });
 
       return res.json({
         success: true,
-        data: { message: "Variation category deleted successfully" },
+        data: { message: "Category deleted successfully" },
       });
     } catch (err) {
-      console.error("Delete variation category error:", err);
-      return res.status(500).json({
-        error: "Failed to delete variation category",
-      });
+      return res.status(404).json({ error: "Category not found" });
     }
   },
 );

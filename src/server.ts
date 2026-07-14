@@ -15,7 +15,7 @@ import modifiersRoutes from "./routes/modifiersRoutes";
 import dashboardRoutes from "./routes/dashboardRoutes";
 import variationCategoryRoutes from "./routes/variationCategoryRoutes";
 import modifierCategoryRoutes from "./routes/modifierCategoryRoutes";
-import pool from "./config/database";
+import prisma from "./config/prisma";
 
 const app = express();
 
@@ -56,12 +56,13 @@ app.get("/", (_, res) => {
 
 app.get("/api/db-test", async (_, res) => {
   try {
-    const result = await pool.query("SELECT NOW()");
+    const result = await prisma.$queryRaw<{ now: Date }[]>`SELECT NOW()`;
+
     res.json({
       message: "Database connected!",
-      timestamp: result.rows[0].now,
+      timestamp: result[0]?.now,
     });
-  } catch (err: Error | any) {
+  } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
