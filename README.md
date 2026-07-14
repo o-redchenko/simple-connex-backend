@@ -4,6 +4,10 @@ A RESTful API backend for a Coffee Shop & Restaurant Management System built wit
 
 The API provides endpoints for authentication, role-based access control, location management, menu item customization, order processing with balance transactions, and analytics dashboard reporting.
 
+## Related Repositories
+
+* **Frontend Dashboard:** [simple-connex](https://github.com/o-redchenko/simple-connex) — React 19 / TypeScript / Tailwind CSS web application.
+
 ---
 
 ## Key Features
